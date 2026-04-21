@@ -2,7 +2,6 @@ import { useMemo, useRef, useEffect, useState } from 'react'
 import './App.css'
 
 const quickPrompts = [
-  { icon: '⚠️', text: 'Find key risks and mitigation points from the report.' },
   { icon: '🚀', text: 'Summarize the machine startup steps.' },
   { icon: '🔴', text: 'What are the machine shutdown steps?' },
   { icon: '⚡', text: 'What are the electrical safety precautions?' },
@@ -340,7 +339,7 @@ function App() {
         <div className="brand">
           <div className="brand-mark">AI</div>
           <div>
-            <h1>Equipment Instruction TroubleShoot</h1>
+            <h1>Equipment Manual Assistant</h1>
             <p>Smart answers from your enterprise knowledge</p>
           </div>
         </div>
@@ -358,16 +357,6 @@ function App() {
       </aside>
 
       <main className="chat-panel">
-        <header className="chat-header">
-          <div>
-            <h2>RAG Agent Assistant</h2>
-            <p>Powered by Azure AI Foundry</p>
-          </div>
-          <span className={`badge ${hasEndpoint && hasApiKey ? 'live' : 'offline'}`}>
-            {hasEndpoint && hasApiKey ? 'Live' : 'Setup Needed'}
-          </span>
-        </header>
-
         <section className="messages">
           {messages.map((message) => (
             <div key={message.id} className={`message-row ${message.role}`}>
