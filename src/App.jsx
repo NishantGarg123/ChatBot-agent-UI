@@ -7,11 +7,11 @@ GlobalWorkerOptions.workerPort = new Worker(
   { type: 'module' },
 )
 
-const PDF_BASE_URL = '/pdf/'
+const PDF_BASE_URL = 'https://expenseattachmentsaa.blob.core.windows.net/equipment-files/'
 const CHUNK_SIZE = 2000
 const CHUNK_OVERLAP = 500
 const CHUNK_STEP = CHUNK_SIZE - CHUNK_OVERLAP
-const PDF_LOAD_TIMEOUT_MS = 45000
+const PDF_LOAD_TIMEOUT_MS = 300000
 const pdfPageCache = new Map()
 
 const quickPrompts = [
@@ -83,7 +83,7 @@ const getPdfFileName = (doc = {}) => {
   return clean
 }
 
-const buildLocalPdfUrl = (fileName) => {
+const buildPdfUrl = (fileName) => {
   if (!fileName) return ''
   return `${PDF_BASE_URL}${encodeURIComponent(fileName)}`
 }
@@ -344,7 +344,7 @@ function App() {
     const fileName = activePdf.fileName
     if (!fileName) return undefined
 
-    const pdfUrl = buildLocalPdfUrl(fileName)
+    const pdfUrl = buildPdfUrl(fileName)
     const controller = new AbortController()
     const fallbackPage = activePdf.page !== null ? activePdf.page + 1 : 1
 
@@ -356,11 +356,11 @@ function App() {
           page: fallbackPage,
           url: pdfUrl,
         })
-
-        // Ensure local PDF is reachable before rendering iframe.
-        const availability = await fetch(pdfUrl, { method: 'HEAD' })
+        console.log('pdfUrl', pdfUrl)
+        // Ensure PDF URL is reachable before rendering iframe.
+        const availability = await fetch(pdfUrl, { method: 'GET' })
         if (!availability.ok) {
-          throw new Error(`PDF file not found in /public/pdf (${availability.status})`)
+          throw new Error(`Failed to load PDF (${availability.status})`)
         }
 
         const chunkIndex = Number.isFinite(activePdf.chunkIndex) ? activePdf.chunkIndex : null
@@ -380,6 +380,8 @@ function App() {
         if (!controller.signal.aborted) {
           const message = error?.message === 'cancelled'
             ? 'PDF processing cancelled.'
+            : error?.message?.startsWith('Failed to load PDF')
+            ? error.message
             : `Could not load PDF: ${error?.message || 'Unknown error'}`
           setPdfViewerState({
             isLoading: false,
@@ -597,7 +599,7 @@ function App() {
                 <div className="pdf-divider" />
 
                 {pdfViewerState.isLoading && (
-                  <p className="pdf-line">Loading PDF from /public/pdf and estimating page...</p>
+                  <p className="pdf-line">Loading PDF...</p>
                 )}
 
                 {!pdfViewerState.isLoading && pdfViewerState.error && (
