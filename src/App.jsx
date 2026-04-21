@@ -1,5 +1,18 @@
 import { useMemo, useRef, useEffect, useState } from 'react'
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import './App.css'
+
+GlobalWorkerOptions.workerPort = new Worker(
+  new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url),
+  { type: 'module' },
+)
+
+const PDF_BASE_URL = '/pdf/'
+const CHUNK_SIZE = 2000
+const CHUNK_OVERLAP = 500
+const CHUNK_STEP = CHUNK_SIZE - CHUNK_OVERLAP
+const PDF_LOAD_TIMEOUT_MS = 45000
+const pdfPageCache = new Map()
 
 const quickPrompts = [
   { icon: '🚀', text: 'Summarize the machine startup steps.' },
@@ -26,6 +39,100 @@ const getPageFromId = (id) => {
     return parseInt(parts[1], 10)
   } catch {
     return null
+  }
+}
+
+const getChunkIndexFromId = (id) => {
+  if (id === null || id === undefined) return null
+  const value = String(id)
+  const pageMatch = value.match(/_pages_(\d+)/i)
+  if (!pageMatch?.[1]) return null
+  const chunkIndex = Number.parseInt(pageMatch[1], 10)
+  return Number.isFinite(chunkIndex) ? chunkIndex : null
+}
+
+const getPdfFileName = (doc = {}) => {
+  const idValue = typeof doc.id === 'string' ? doc.id : ''
+  const idMatch = idValue.match(/equipment-files\/(.+?)(?:_pages_|$)/i)
+  const fromId = idMatch?.[1] || null
+
+  const candidate = fromId
+    ?? doc.fileName
+    ?? doc.filename
+    ?? doc.file_name
+    ?? doc.pdfFileName
+    ?? doc.documentName
+    ?? doc.metadata_storage_name
+    ?? doc.sourcefile
+    ?? doc.source
+    ?? doc.title
+
+  if (!candidate || typeof candidate !== 'string') return null
+  const raw = candidate.split('?')[0].split('#')[0].split('/').pop()?.trim()
+  if (!raw) return null
+
+  let clean = raw
+  try {
+    clean = decodeURIComponent(clean)
+  } catch {
+    clean = raw
+  }
+
+  clean = clean.replace(/(\.pdf)\d+$/i, '$1')
+  if (!/\.pdf$/i.test(clean)) clean = `${clean}.pdf`
+  return clean
+}
+
+const buildLocalPdfUrl = (fileName) => {
+  if (!fileName) return ''
+  return `${PDF_BASE_URL}${encodeURIComponent(fileName)}`
+}
+
+const estimatePageFromChunk = async (pdfUrl, chunkIndex, signal) => {
+  if (pdfPageCache.has(pdfUrl)) {
+    const ranges = pdfPageCache.get(pdfUrl)
+    const targetOffset = Math.max(0, chunkIndex * CHUNK_STEP)
+    const cachedPage = ranges.find((item) => targetOffset < item.endOffset)
+    return cachedPage?.pageNumber ?? ranges[ranges.length - 1]?.pageNumber ?? 1
+  }
+
+  const targetOffset = Math.max(0, chunkIndex * CHUNK_STEP)
+  const loadingTask = getDocument({ url: pdfUrl, withCredentials: false })
+  const timeoutId = setTimeout(() => {
+    loadingTask.destroy()
+  }, PDF_LOAD_TIMEOUT_MS)
+  try {
+    const pdf = await loadingTask.promise
+
+    let runningChars = 0
+    const ranges = []
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (signal?.aborted) throw new Error('cancelled')
+      const page = await pdf.getPage(pageNumber)
+      const textContent = await page.getTextContent()
+      const pageChars = textContent.items
+        .map((item) => item?.str || '')
+        .join(' ')
+        .length
+
+      const nextChars = runningChars + pageChars
+      ranges.push({ pageNumber, startOffset: runningChars, endOffset: nextChars })
+      if (nextChars >= targetOffset) {
+        pdfPageCache.set(pdfUrl, ranges)
+        return pageNumber
+      }
+      runningChars = nextChars
+
+      // Yield periodically so large PDFs do not block UI.
+      if (pageNumber % 5 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+    }
+
+    pdfPageCache.set(pdfUrl, ranges)
+    return 1
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -62,10 +169,19 @@ const extractSources = (data) => {
     .map((doc) => {
       const title = doc.title || 'Document'
       const page = getPageFromId(doc.id)
-      const key = `${title}_${page}`
+      const fileName = getPdfFileName(doc)
+      const chunkIndex = getChunkIndexFromId(doc.id)
+      const key = `${title}_${page}_${fileName}_${chunkIndex}`
       if (seen.has(key)) return null
       seen.add(key)
-      return { title, page, content: doc.content || '', score: getDocumentScore(doc) }
+      return {
+        title,
+        page,
+        content: doc.content || '',
+        score: getDocumentScore(doc),
+        chunkIndex,
+        fileName,
+      }
     })
     .filter(Boolean)
 
@@ -77,34 +193,6 @@ const extractSources = (data) => {
   })
 
   return docs.map((doc, idx) => ({ ...doc, num: idx + 1 }))
-}
-
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
-const getSearchTerms = (query) => {
-  if (!query || typeof query !== 'string') return []
-  const stopWords = new Set([
-    'the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
-    'be', 'by', 'as', 'at', 'it', 'that', 'this', 'from', 'what', 'how', 'when', 'where', 'which',
-  ])
-  const words = query
-    .toLowerCase()
-    .match(/[a-z0-9]+/g) || []
-  const unique = [...new Set(words)]
-  return unique.filter((word) => word.length > 2 && !stopWords.has(word))
-}
-
-const splitIntoParagraphs = (text) => {
-  if (!text || typeof text !== 'string') return []
-  const normalized = text.replace(/\r\n/g, '\n').trim()
-  if (!normalized) return []
-
-  const paragraphs = normalized
-    .split(/\n{2,}/)
-    .map((block) => block.replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim())
-    .filter(Boolean)
-
-  return paragraphs.length ? paragraphs : [normalized.replace(/\s+/g, ' ').trim()]
 }
 
 const isIndexLikeLine = (line) => {
@@ -132,21 +220,6 @@ const isLikelyIndexContent = (text, title = '') => {
   const hasIndexTitle = /\b(index|table of contents|contents)\b/i.test(title)
 
   return indexLikeRatio >= 0.35 || (hasIndexTitle && indexLikeRatio >= 0.2)
-}
-
-const renderHighlightedText = (text, terms) => {
-  if (!terms.length) return text
-  const pattern = new RegExp(`(${terms.map(escapeRegex).join('|')})`, 'gi')
-  const parts = text.split(pattern)
-
-  return parts.map((part, idx) => {
-    const isMatch = terms.some((term) => term.toLowerCase() === part.toLowerCase())
-    return isMatch ? (
-      <mark key={`${part}-${idx}`} className="pdf-highlight">{part}</mark>
-    ) : (
-      <span key={`${part}-${idx}`}>{part}</span>
-    )
-  })
 }
 
 const extractResponseText = (data) => {
@@ -245,6 +318,12 @@ function App() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [activePdf, setActivePdf] = useState(null)
+  const [pdfViewerState, setPdfViewerState] = useState({
+    isLoading: false,
+    error: '',
+    page: null,
+    url: '',
+  })
   // Which message's sources panel is open
   const [openSourcesMsgId, setOpenSourcesMsgId] = useState(null)
 
@@ -258,6 +337,66 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    if (!activePdf) return undefined
+
+    const fileName = activePdf.fileName
+    if (!fileName) return undefined
+
+    const pdfUrl = buildLocalPdfUrl(fileName)
+    const controller = new AbortController()
+    const fallbackPage = activePdf.page !== null ? activePdf.page + 1 : 1
+
+    const resolvePage = async () => {
+      try {
+        setPdfViewerState({
+          isLoading: true,
+          error: '',
+          page: fallbackPage,
+          url: pdfUrl,
+        })
+
+        // Ensure local PDF is reachable before rendering iframe.
+        const availability = await fetch(pdfUrl, { method: 'HEAD' })
+        if (!availability.ok) {
+          throw new Error(`PDF file not found in /public/pdf (${availability.status})`)
+        }
+
+        const chunkIndex = Number.isFinite(activePdf.chunkIndex) ? activePdf.chunkIndex : null
+        const estimatedPage = chunkIndex === null
+          ? fallbackPage
+          : await estimatePageFromChunk(pdfUrl, chunkIndex, controller.signal)
+
+        if (!controller.signal.aborted) {
+          setPdfViewerState({
+            isLoading: false,
+            error: '',
+            page: estimatedPage,
+            url: pdfUrl,
+          })
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const message = error?.message === 'cancelled'
+            ? 'PDF processing cancelled.'
+            : `Could not load PDF: ${error?.message || 'Unknown error'}`
+          setPdfViewerState({
+            isLoading: false,
+            error: message,
+            page: fallbackPage,
+            url: pdfUrl,
+          })
+        }
+      }
+    }
+
+    resolvePage()
+
+    return () => {
+      controller.abort()
+    }
+  }, [activePdf])
 
   const addUserMessage = (content) => {
     setMessages((prev) => [
@@ -446,22 +585,36 @@ function App() {
             <div className="pdf-modal-body">
               <div className="pdf-content-viewer">
                 <div className="pdf-doc-meta">
-                  <span className="pdf-doc-icon">📋</span>
+                  <span className="pdf-doc-icon">📄</span>
                   <div>
-                    <p className="pdf-doc-name">{activePdf.title}</p>
-                    {activePdf.page !== null && (
-                      <p className="pdf-doc-page">Extracted from Page {activePdf.page + 1}</p>
-                    )}
+                    <p className="pdf-doc-name">{activePdf.fileName || activePdf.title}</p>
+                    <p className="pdf-doc-page">
+                      {pdfViewerState.page ? `Opening page ${pdfViewerState.page}` : 'Preparing PDF preview...'}
+                      {Number.isFinite(activePdf.chunkIndex) ? ` (chunk ${activePdf.chunkIndex})` : ''}
+                    </p>
                   </div>
                 </div>
                 <div className="pdf-divider" />
-                <div className="pdf-text-body">
-                  {splitIntoParagraphs(activePdf.content).map((paragraph, idx) => (
-                    <p key={idx} className="pdf-line">
-                      {renderHighlightedText(paragraph, getSearchTerms(activePdf.query))}
-                    </p>
-                  ))}
-                </div>
+
+                {pdfViewerState.isLoading && (
+                  <p className="pdf-line">Loading PDF from /public/pdf and estimating page...</p>
+                )}
+
+                {!pdfViewerState.isLoading && pdfViewerState.error && (
+                  <p className="pdf-line">{pdfViewerState.error}</p>
+                )}
+
+                {!activePdf.fileName && (
+                  <p className="pdf-line">No PDF file name found in source metadata.</p>
+                )}
+
+                {!pdfViewerState.isLoading && !pdfViewerState.error && activePdf.fileName && pdfViewerState.url && (
+                  <iframe
+                    title={activePdf.fileName || activePdf.title}
+                    className="pdf-iframe"
+                    src={`${pdfViewerState.url}#page=${pdfViewerState.page || 1}&zoom=page-width`}
+                  />
+                )}
               </div>
             </div>
           </div>
