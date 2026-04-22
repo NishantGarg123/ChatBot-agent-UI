@@ -297,9 +297,9 @@ function InlineSourcesPanel({ sources, onClose, onOpenPdf }) {
             <div className="isp-info">
               <div className="isp-top">
                 <span className="isp-title">{src.title}</span>
-                {src.page !== null && (
+                {/* {src.page !== null && (
                   <span className="isp-page">p.{src.page + 1}</span>
-                )}
+                )} */}
               </div>
               <span className="isp-preview">
                 {src.content.replace(/\s+/g, ' ').trim().slice(0, 75)}…
