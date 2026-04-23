@@ -7,7 +7,8 @@ GlobalWorkerOptions.workerPort = new Worker(
   { type: 'module' },
 )
 
-const PDF_BASE_URL = 'https://expenseattachmentsaa.blob.core.windows.net/equipment-files/'
+const PDF_BASE_URL = import.meta.env.VITE_PDF_BASE_URL || 'https://expenseattachmentsaa.blob.core.windows.net/equipment-files/'
+const CHAT_THREAD_STORAGE_KEY = 'azure-agent-thread-id'
 const CHUNK_SIZE = 2000
 const CHUNK_OVERLAP = 500
 const CHUNK_STEP = CHUNK_SIZE - CHUNK_OVERLAP
@@ -329,10 +330,7 @@ function App() {
 
   const messagesEndRef = useRef(null)
 
-  const endpoint = import.meta.env.VITE_RAG_API_URL
-  const apiKey = import.meta.env.VITE_AZURE_API_KEY
-  const hasEndpoint = useMemo(() => Boolean(endpoint), [endpoint])
-  const hasApiKey = useMemo(() => Boolean(apiKey), [apiKey])
+  const apiBaseUrl = useMemo(() => import.meta.env.VITE_API_BASE_URL || '', [])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -428,22 +426,27 @@ function App() {
   }
 
   const getAgentReply = async (question) => {
-    if (!hasEndpoint) return { content: 'UI is ready. Add your endpoint in `.env` as `VITE_RAG_API_URL`.', usage: null, sources: [] }
-    if (!hasApiKey) return { content: 'Endpoint is set, but API key is missing. Add `VITE_AZURE_API_KEY` in `.env`.', usage: null, sources: [] }
-
     try {
-      const response = await fetch(endpoint, {
+      const storedThreadId = window.localStorage.getItem(CHAT_THREAD_STORAGE_KEY)
+      const response = await fetch(`${apiBaseUrl}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
-        body: JSON.stringify({ input: question }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: question,
+          ...(storedThreadId ? { threadId: storedThreadId } : {}),
+        }),
       })
 
-      if (!response.ok) return { content: 'I could not connect to your agent right now.', usage: null, sources: [] }
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) return { content: data?.error || 'I could not connect to your agent right now.', usage: null, sources: [] }
 
-      const data = await response.json()
-      const responseText = extractResponseText(data)
-      const usage = extractUsage(data)
-      const sources = extractSources(data)
+      if (data?.threadId) {
+        window.localStorage.setItem(CHAT_THREAD_STORAGE_KEY, data.threadId)
+      }
+
+      const responseText = data?.reply ?? extractResponseText(data)
+      const usage = data?.usage ?? extractUsage(data)
+      const sources = Array.isArray(data?.sources) ? data.sources : extractSources(data)
 
       if (!responseText) console.warn('No answer text found:', data)
 
