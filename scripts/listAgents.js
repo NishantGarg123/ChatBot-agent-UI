@@ -5,7 +5,7 @@ import { DefaultAzureCredential } from '@azure/identity'
 const projectEndpoint = process.env.AZURE_AI_PROJECT_ENDPOINT ?? process.env.FOUNDRY_PROJECT_ENDPOINT
 const configuredAgentId = process.env.AZURE_AI_AGENT_ID ?? process.env.AZURE_AGENT_ID
 const configuredAgentName = process.env.AZURE_AI_AGENT_NAME
-const inputMessage = process.env.TEST_MESSAGE ?? 'Explain AI in simple terms'
+const inputMessage = process.env.TEST_MESSAGE ?? 'How to start machine?'
 
 if (!projectEndpoint) {
   console.error('Missing AZURE_AI_PROJECT_ENDPOINT (or FOUNDRY_PROJECT_ENDPOINT) in .env')
@@ -28,48 +28,7 @@ const listAgents = async (client) => {
   return client.agents.list()
 }
 
-const createThread = async (client) => {
-  if (typeof client.agents.createThread === 'function') {
-    return client.agents.createThread()
-  }
-  return client.agents.threads.create()
-}
-
-const createMessage = async (client, threadId, message) => {
-  if (typeof client.agents.createMessage === 'function') {
-    return client.agents.createMessage(threadId, { role: 'user', content: message })
-  }
-  return client.agents.messages.create(threadId, 'user', message)
-}
-
-const createRun = async (client, threadId, agentId) => {
-  if (typeof client.agents.createRun === 'function') {
-    return client.agents.createRun(threadId, agentId)
-  }
-  return client.agents.runs.create(threadId, agentId)
-}
-
-const getRun = async (client, threadId, runId) => {
-  if (typeof client.agents.getRun === 'function') {
-    return client.agents.getRun(threadId, runId)
-  }
-  return client.agents.runs.get(threadId, runId)
-}
-
-const listMessages = async (client, threadId, runId) => {
-  if (typeof client.agents.listMessages === 'function') {
-    const page = await client.agents.listMessages(threadId, { runId, order: 'desc', limit: 20 })
-    return Array.isArray(page?.data) ? page.data : []
-  }
-
-  const messages = []
-  for await (const msg of client.agents.messages.list(threadId, { runId, order: 'desc', limit: 20 })) {
-    messages.push(msg)
-  }
-  return messages
-}
-
-const resolveAgentId = async (client) => {
+const resolveAgent = async (client) => {
   const agents = await listAgents(client)
   const allAgents = []
   for await (const agent of agents) {
@@ -90,7 +49,7 @@ const resolveAgentId = async (client) => {
     if (!matched) {
       throw new Error(`Configured AZURE_AI_AGENT_ID not found in project: ${configuredAgentId}`)
     }
-    return matched.id
+    return matched
   }
 
   if (configuredAgentName) {
@@ -98,41 +57,48 @@ const resolveAgentId = async (client) => {
     if (!matched) {
       throw new Error(`Configured AZURE_AI_AGENT_NAME not found in project: ${configuredAgentName}`)
     }
-    return matched.id
+    return matched
   }
 
-  return allAgents[0].id
+  return allAgents[0]
 }
 
 try {
   const client = new AIProjectClient(projectEndpoint, new DefaultAzureCredential())
-  const agentId = await resolveAgentId(client)
+  const openai = client.getOpenAIClient()
+  const selectedAgent = await resolveAgent(client)
 
-  console.log('\nUsing agent ID:', agentId)
-  const thread = await createThread(client)
-  console.log('Created thread:', thread.id)
+  // Responses API in Foundry expects an agent reference object.
+  const agentRef = {
+    type: 'agent_reference',
+    name: selectedAgent.name,
+  }
+  console.log('\nUsing agent:', `${selectedAgent.name} (${selectedAgent.id})`)
 
-  await createMessage(client, thread.id, inputMessage)
-  const run = await createRun(client, thread.id, agentId)
-  console.log('Run started:', run.id)
+  const conversation = await openai.conversations.create()
+  console.log('Created conversation:', conversation.id)
 
-  let finalRun = run
-  for (let i = 0; i < 40; i += 1) {
-    finalRun = await getRun(client, thread.id, run.id)
-    if (finalRun.status === 'completed') break
-    if (['failed', 'cancelled', 'cancelling', 'expired', 'requires_action'].includes(finalRun.status)) {
-      throw new Error(`Run ended with status: ${finalRun.status}`)
-    }
+  let response = await openai.responses.create({
+    agent: agentRef,
+    conversation: conversation.id,
+    input: inputMessage,
+  })
+
+  for (let i = 0; i < 40 && response.status === 'queued'; i += 1) {
     await delay(1500)
+    response = await openai.responses.retrieve(response.id)
   }
 
-  if (finalRun.status !== 'completed') {
-    throw new Error(`Run timed out with status: ${finalRun.status}`)
+  if (response.status !== 'completed') {
+    throw new Error(`Response ended with status: ${response.status}`)
   }
-
-  const messages = await listMessages(client, thread.id, finalRun.id)
-  const assistant = messages.find((msg) => msg.role === 'assistant')
-  const reply = extractAssistantText(assistant?.content)
+  console.log('---response -', response)
+  const reply = (response.output ?? [])
+    .filter((item) => item.type === 'message' && item.role === 'assistant')
+    .flatMap((item) => item.content ?? [])
+    .filter((item) => item.type === 'output_text')
+    .map((item) => item.text)
+    .join('\n')
 
   console.log('\nUser:', inputMessage)
   console.log('Assistant:', reply || '[No text reply found]')
