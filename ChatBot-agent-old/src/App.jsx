@@ -22,6 +22,16 @@ const quickPrompts = [
   { icon: '💡', text: 'What does the red light on the light column indicate?' },
 ]
 
+const initialMessages = [
+  {
+    id: 1,
+    role: 'assistant',
+    content:
+      "Hi! I'm your RAG Assistant. Ask me anything from your Azure AI Foundry knowledge source.",
+    time: '10:10 AM',
+  },
+]
+
 const getPageFromId = (id) => {
   try {
     const parts = id.split('_pages_')
@@ -303,20 +313,10 @@ function InlineSourcesPanel({ sources, onClose, onOpenPdf }) {
   )
 }
 
-const makeWelcomeMessage = () => ({
-  id: 1,
-  role: 'assistant',
-  content: "Hi! I'm your RAG Assistant. Ask me anything from your Azure AI Foundry knowledge source.",
-  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-})
-
 function App() {
-  const [messages, setMessages] = useState([makeWelcomeMessage()])
+  const [messages, setMessages] = useState(initialMessages)
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [conversations, setConversations] = useState([])
-  const [activeConversationId, setActiveConversationId] = useState('')
   const [activePdf, setActivePdf] = useState(null)
   const [pdfViewerState, setPdfViewerState] = useState({
     isLoading: false,
@@ -328,29 +328,15 @@ function App() {
   const [openSourcesMsgId, setOpenSourcesMsgId] = useState(null)
 
   const messagesEndRef = useRef(null)
-  const backendUrl = useMemo(
-    () => (import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000').replace(/\/+$/, ''),
-    [],
-  )
+
+  const endpoint = import.meta.env.VITE_RAG_API_URL
+  const apiKey = import.meta.env.VITE_AZURE_API_KEY
+  const hasEndpoint = useMemo(() => Boolean(endpoint), [endpoint])
+  const hasApiKey = useMemo(() => Boolean(apiKey), [apiKey])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
-
-  useEffect(() => {
-    const loadConversations = async () => {
-      try {
-        const response = await fetch(`${backendUrl}/api/conversations`)
-        if (!response.ok) return
-        const data = await response.json()
-        if (Array.isArray(data)) setConversations(data)
-      } catch {
-        // Non-blocking for chat flow.
-      }
-    }
-
-    loadConversations()
-  }, [backendUrl])
 
   useEffect(() => {
     if (!activePdf) return undefined
@@ -441,23 +427,23 @@ function App() {
     ])
   }
 
-  const getAgentReply = async (question, conversationId) => {
+  const getAgentReply = async (question) => {
+    if (!hasEndpoint) return { content: 'UI is ready. Add your endpoint in `.env` as `VITE_RAG_API_URL`.', usage: null, sources: [] }
+    if (!hasApiKey) return { content: 'Endpoint is set, but API key is missing. Add `VITE_AZURE_API_KEY` in `.env`.', usage: null, sources: [] }
+
     try {
-      const response = await fetch(`${backendUrl}/api/chat`, {
+      const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: question,
-          conversationId: conversationId || undefined,
-        }),
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({ input: question }),
       })
 
-      if (!response.ok) return { content: 'I could not connect to your agent right now.', usage: null, sources: [], conversationId }
+      if (!response.ok) return { content: 'I could not connect to your agent right now.', usage: null, sources: [] }
 
       const data = await response.json()
-      const responseText = data.assistantMessage || extractResponseText(data)
-      const usage = data.usage || extractUsage(data)
-      const sources = data.sources || extractSources(data)
+      const responseText = extractResponseText(data)
+      const usage = extractUsage(data)
+      const sources = extractSources(data)
 
       if (!responseText) console.warn('No answer text found:', data)
 
@@ -465,74 +451,10 @@ function App() {
         content: normalizeAssistantText(responseText) || 'Response received, but no answer text was found.',
         usage,
         sources,
-        conversationId: data.conversationId || conversationId || '',
       }
     } catch (error) {
-      return { content: `Connection error: ${error.message}`, usage: null, sources: [], conversationId }
+      return { content: `Connection error: ${error.message}`, usage: null, sources: [] }
     }
-  }
-
-  const addConversationIfMissing = (conversationId, firstMessage) => {
-    if (!conversationId) return
-    setConversations((prev) => {
-      if (prev.some((item) => item.conversation_id === conversationId)) return prev
-      return [
-        {
-          conversation_id: conversationId,
-          initial_message: firstMessage,
-          created_at: new Date().toISOString(),
-        },
-        ...prev,
-      ]
-    })
-  }
-
-  const loadConversationMessages = async (conversationId) => {
-    if (!conversationId || historyLoading || isLoading) return
-    setHistoryLoading(true)
-    setOpenSourcesMsgId(null)
-    setActiveConversationId(conversationId)
-    setActivePdf(null)
-
-    try {
-      const response = await fetch(`${backendUrl}/api/conversations/${encodeURIComponent(conversationId)}/messages`)
-      if (!response.ok) throw new Error('Failed to load conversation')
-      const data = await response.json()
-      const mapped = Array.isArray(data?.messages) ? data.messages : []
-
-      setMessages(
-        mapped.length > 0
-          ? mapped.map((message, index) => ({
-            id: message.id || `${conversationId}_${index}`,
-            role: message.role === 'assistant' ? 'assistant' : 'user',
-            content: message.content,
-            usage: null,
-            sources: [],
-            question: '',
-            time: message.time || '',
-          }))
-          : [makeWelcomeMessage()],
-      )
-    } catch (error) {
-      setMessages([
-        makeWelcomeMessage(),
-        {
-          id: Date.now(),
-          role: 'assistant',
-          content: `Could not load conversation history: ${error.message}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        },
-      ])
-    } finally {
-      setHistoryLoading(false)
-    }
-  }
-
-  const startNewConversation = () => {
-    setActiveConversationId('')
-    setOpenSourcesMsgId(null)
-    setActivePdf(null)
-    setMessages([makeWelcomeMessage()])
   }
 
   const handleSend = async (message) => {
@@ -543,11 +465,7 @@ function App() {
     setOpenSourcesMsgId(null)
     addUserMessage(trimmed)
     setIsLoading(true)
-    const reply = await getAgentReply(trimmed, activeConversationId)
-    if (reply.conversationId) {
-      setActiveConversationId(reply.conversationId)
-      addConversationIfMissing(reply.conversationId, trimmed)
-    }
+    const reply = await getAgentReply(trimmed)
     addAssistantMessage(reply.content, reply.usage, reply.sources, trimmed)
     setIsLoading(false)
   }
@@ -575,34 +493,6 @@ function App() {
                 <span className="prompt-text">{prompt.text}</span>
               </button>
             ))}
-          </div>
-        </div>
-        <div className="status-card conversations-card">
-          <div className="conversation-header">
-            <h2>🕘 Conversations</h2>
-            <button type="button" className="new-conversation-btn" onClick={startNewConversation}>
-              New
-            </button>
-          </div>
-          <div className="conversation-list">
-            {conversations.length === 0 ? (
-              <p className="conversation-empty">No conversation history yet.</p>
-            ) : (
-              conversations.map((item) => (
-                <button
-                  key={item.conversation_id}
-                  className={`conversation-item ${activeConversationId === item.conversation_id ? 'active' : ''}`}
-                  onClick={() => loadConversationMessages(item.conversation_id)}
-                >
-                  <span className="conversation-title">
-                    {(item.initial_message || 'Conversation').slice(0, 70)}
-                  </span>
-                  <span className="conversation-meta">
-                    {new Date(item.created_at).toLocaleString()}
-                  </span>
-                </button>
-              ))
-            )}
           </div>
         </div>
       </aside>
@@ -646,7 +536,7 @@ function App() {
                 )}
             </div>
           ))}
-          {(isLoading || historyLoading) && (
+          {isLoading && (
             <div className="message-row assistant">
               <article className="message assistant">
                 <div className="avatar">AI</div>
